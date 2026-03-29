@@ -2,13 +2,13 @@
 
 //! qhedge-risk
 //!
-//! A quantum-style (quantum-inspired / quantum-ready) risk, VaR, CVaR,
+//! A quantum-style (quantum-inspired / quantum-ready) risk, `VaR`, `CVaR`,
 //! and scenario engine for hedge-style portfolios.
 //!
 //! Core ideas:
 //! - classical Monte Carlo for baseline risk estimation
 //! - quantum-inspired variance reduction for sample-efficient tail estimation
-//! - reusable scenario bundles for VaR, CVaR, stress, and what-if analysis
+//! - reusable scenario bundles for `VaR`, `CVaR`, stress, and what-if analysis
 
 extern crate alloc;
 
@@ -56,7 +56,7 @@ pub struct Position {
     pub delta: f64,
 }
 
-/// A hedge-style portfolio used for VaR / scenario calculations.
+/// A hedge-style portfolio used for `VaR` / scenario calculations.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VaRPortfolio {
     /// Portfolio positions.
@@ -68,6 +68,7 @@ pub struct VaRPortfolio {
 impl VaRPortfolio {
     /// Construct a portfolio from positions and a correlation matrix.
     #[must_use]
+    #[allow(clippy::missing_const_for_fn)]
     pub fn from_positions(positions: Vec<Position>, correlations: Vec<f64>) -> Self {
         Self {
             positions,
@@ -123,7 +124,7 @@ impl VaRPortfolio {
 pub struct Scenario {
     /// Path index.
     pub path_id: u64,
-    /// Simulated portfolio PnL over the horizon.
+    /// Simulated portfolio `PnL` over the horizon.
     pub pnl: f64,
     /// Simulated shocked returns by position.
     pub returns: Vec<f64>,
@@ -147,7 +148,7 @@ pub struct ScenarioBundle {
 pub struct VaR {
     /// Confidence level (e.g. 0.95, 0.99).
     pub confidence: f64,
-    /// VaR magnitude.
+    /// `VaR` magnitude.
     pub value: f64,
     /// Horizon for the estimate.
     pub horizon: Duration,
@@ -158,7 +159,7 @@ pub struct VaR {
 pub struct CVaR {
     /// Confidence level.
     pub confidence: f64,
-    /// Expected shortfall / CVaR magnitude.
+    /// Expected shortfall / `CVaR` magnitude.
     pub value: f64,
     /// Horizon for the estimate.
     pub horizon: Duration,
@@ -167,9 +168,9 @@ pub struct CVaR {
 /// Tail-risk summary.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TailRisk {
-    /// VaR estimate.
+    /// `VaR` estimate.
     pub var: VaR,
-    /// CVaR estimate.
+    /// `CVaR` estimate.
     pub cvar: CVaR,
     /// Extreme-loss estimate derived from the left tail.
     pub extreme_loss: f64,
@@ -182,7 +183,7 @@ pub struct StressScenario {
     pub name: String,
     /// Position-level shocked returns.
     pub shocked_returns: Vec<f64>,
-    /// Resulting portfolio PnL.
+    /// Resulting portfolio `PnL`.
     pub pnl: f64,
 }
 
@@ -221,8 +222,12 @@ impl RiskEngine {
         })
     }
 
-    /// Compute portfolio VaR over a horizon.
-    pub fn compute_var(&self, portfolio: &VaRPortfolio, horizon: Duration) -> Result<VaR, RiskError> {
+    /// Compute portfolio `VaR` over a horizon.
+    pub fn compute_var(
+        &self,
+        portfolio: &VaRPortfolio,
+        horizon: Duration,
+    ) -> Result<VaR, RiskError> {
         let bundle = self.simulate_scenarios(portfolio, self.default_paths())?;
         let var_value = compute_var_from_bundle(&bundle, self.confidence)?;
         Ok(VaR {
@@ -232,8 +237,12 @@ impl RiskEngine {
         })
     }
 
-    /// Compute portfolio CVaR over a horizon.
-    pub fn compute_cvar(&self, portfolio: &VaRPortfolio, horizon: Duration) -> Result<CVaR, RiskError> {
+    /// Compute portfolio `CVaR` over a horizon.
+    pub fn compute_cvar(
+        &self,
+        portfolio: &VaRPortfolio,
+        horizon: Duration,
+    ) -> Result<CVaR, RiskError> {
         let bundle = self.simulate_scenarios(portfolio, self.default_paths())?;
         let cvar_value = compute_cvar_from_bundle(&bundle, self.confidence)?;
         Ok(CVaR {
@@ -441,20 +450,23 @@ mod tests {
 
     #[test]
     fn single_asset_portfolio_constructs() {
-        let portfolio = VaRPortfolio::from_positions(vec![simple_position(10.0, 0.2)], identity_corr(1));
+        let portfolio =
+            VaRPortfolio::from_positions(vec![simple_position(10.0, 0.2)], identity_corr(1));
         assert_eq!(portfolio.len(), 1);
         assert_relative_eq!(portfolio.gross_exposure(), 1_000.0);
     }
 
     #[test]
     fn zero_position_has_zero_delta_exposure() {
-        let portfolio = VaRPortfolio::from_positions(vec![simple_position(0.0, 0.2)], identity_corr(1));
+        let portfolio =
+            VaRPortfolio::from_positions(vec![simple_position(0.0, 0.2)], identity_corr(1));
         assert_relative_eq!(portfolio.delta_exposure(), 0.0);
     }
 
     #[test]
     fn zero_vol_portfolio_has_zero_var() {
-        let portfolio = VaRPortfolio::from_positions(vec![simple_position(10.0, 0.0)], identity_corr(1));
+        let portfolio =
+            VaRPortfolio::from_positions(vec![simple_position(10.0, 0.0)], identity_corr(1));
         let engine = RiskEngine::new(QBackend::ClassicalFallback, 0.95).unwrap();
         let var = engine.compute_var(&portfolio, Duration::days(1)).unwrap();
         assert_relative_eq!(var.value, 0.0);
@@ -466,7 +478,8 @@ mod tests {
             vec![simple_position(10.0, 0.2), simple_position(-4.0, 0.3)],
             identity_corr(2),
         );
-        let engine = RiskEngine::new(QBackend::QuantumInspired { max_samples: 4_096 }, 0.95).unwrap();
+        let engine =
+            RiskEngine::new(QBackend::QuantumInspired { max_samples: 4_096 }, 0.95).unwrap();
         let var = engine.compute_var(&portfolio, Duration::days(1)).unwrap();
         let cvar = engine.compute_cvar(&portfolio, Duration::days(1)).unwrap();
         assert!(cvar.value >= var.value);
