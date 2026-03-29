@@ -1,0 +1,63 @@
+[package]
+name = "qhedge-risk"
+version = "0.1.0"
+edition = "2024"
+authors = ["Yabloko Labs"]
+license = "Apache-2.0"
+description = "A quantum-style risk / VaR / scenario engine for hedge-style portfolios"
+repository = "https://github.com/yablokolabs/qhedge-risk"
+homepage = "https://github.com/yablokolabs/qhedge-risk"
+documentation = "https://docs.rs/qhedge-risk"
+readme = "README.md"
+keywords = ["quantum", "risk", "var", "cvar", "hedge-fund"]
+categories = ["finance", "mathematics", "science", "simulation"]
+rust-version = "1.85"
+
+[features]
+default = ["std"]
+std = [
+  "rand/std",
+  "rand_distr/std",
+  "serde_json/std",
+  "thiserror/std",
+  "chrono/std",
+  "ndarray/std",
+]
+python_binding = ["dep:pyo3"]
+quantum_hardware = []
+
+[dependencies]
+rand = { version = "0.9", default-features = false, features = ["small_rng", "std_rng"] }
+rand_distr = { version = "0.5", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+thiserror = { version = "2", default-features = false }
+ndarray = { version = "0.16", default-features = false, features = ["serde"] }
+statrs = "0.18"
+chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
+pyo3 = { version = "0.22", optional = true, features = ["extension-module"] }
+
+[dev-dependencies]
+approx = "0.5"
+proptest = "1.5"
+criterion = "0.5"
+
+[[bench]]
+name = "var_bench"
+harness = false
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unused_results = "warn"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
+nursery = "warn"
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+cast_precision_loss = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
