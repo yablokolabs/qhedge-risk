@@ -9,6 +9,7 @@ This version expands the mathematical sketch toward:
 - tail-risk ordering (`CVaR ≥ VaR`)
 - scenario / historical replay structure
 - shock model placeholders for Gaussian and fat-tail processes
+- factor-model-aware risk narratives
 -/
 
 namespace QhedgeRisk
@@ -25,10 +26,16 @@ deriving Repr
 
 structure Position where
   exposure : Exposure
+  factorLoadings : List Rational
+  idioVol : Rational
 deriving Repr
 
 structure Portfolio where
   positions : List Position
+deriving Repr
+
+structure FactorModel where
+  covariance : List (List Rational)
 deriving Repr
 
 structure ReturnProcess where
@@ -39,6 +46,12 @@ deriving Repr
 /-- Aggregate portfolio exposure. -/
 def Portfolio.totalExposure (p : Portfolio) : Exposure :=
   p.positions.foldl (fun acc pos => acc + pos.exposure) 0
+
+/-- Simple factor exposure for a given factor index. -/
+def Portfolio.factorExposure (p : Portfolio) (i : Nat) : Rational :=
+  p.positions.foldl
+    (fun acc pos => acc + pos.exposure * (pos.factorLoadings.getD i 0))
+    0
 
 /-- A simple empirical loss quantile proxy over a finite sample.
 For now this is a placeholder first element model; later it should be replaced by
@@ -59,6 +72,9 @@ def CVaR (α : Rational) (losses : List Loss) : Loss :=
 def replayHistorical (p : Portfolio) (rp : ReturnProcess) : List Loss :=
   rp.scenarios.map fun returns =>
     List.zipWith (fun pos r => pos.exposure * r) p.positions returns |>.sum
+
+/-- Parametric Gaussian VaR sketch: z-score times volatility proxy. -/
+def parametricVaR (zσ : Rational) : Loss := zσ
 
 /-- Toy lemma: if every tail loss is at least the first element (our current VaR proxy),
 then the average tail loss (our current CVaR proxy) is at least VaR. -/
@@ -88,5 +104,13 @@ theorem tail_risk_monotonic_in_scale
     (p : Portfolio) :
     k₁ * p.totalExposure ≤ k₂ * p.totalExposure := by
   nlinarith [h_scale.1, h_scale.2]
+
+/-- Increasing exposure to a positive factor loading should not reduce factor exposure. -/
+theorem factor_exposure_monotonic
+    (e₁ e₂ β : Rational)
+    (h : e₁ ≤ e₂)
+    (hβ : 0 ≤ β) :
+    e₁ * β ≤ e₂ * β := by
+  nlinarith
 
 end QhedgeRisk

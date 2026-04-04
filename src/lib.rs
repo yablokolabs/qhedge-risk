@@ -5,12 +5,12 @@
 //! A quantum-style (quantum-inspired / quantum-ready) risk, `VaR`, `CVaR`,
 //! and scenario engine for hedge-style portfolios.
 //!
-//! This crate focuses on:
-//! - classical Monte Carlo for baseline risk estimation
-//! - quantum-inspired variance reduction for sample-efficient tail estimation
-//! - historical replay / stress bundles
-//! - fat-tail scenario generation
-//! - reusable scenario bundles for `VaR`, `CVaR`, stress, and what-if analysis
+//! This version includes:
+//! - correlated multivariate Monte Carlo
+//! - heavier-tail shock models
+//! - historical replay
+//! - factor-model-based scenario generation
+//! - empirical, historical, and parametric `VaR` estimators
 
 extern crate alloc;
 
@@ -22,6 +22,7 @@ use rand::SeedableRng;
 use rand::rngs::SmallRng;
 use rand_distr::{ChiSquared, Distribution, StandardNormal};
 use serde::{Deserialize, Serialize};
+use statrs::distribution::{ContinuousCDF, Normal};
 use statrs::statistics::Statistics;
 use thiserror::Error;
 
@@ -78,6 +79,30 @@ pub struct Position {
     pub delta: f64,
     /// Gamma-like second-order sensitivity.
     pub gamma: f64,
+    /// Factor loadings for systematic risk factors.
+    pub factor_loadings: Vec<f64>,
+    /// Idiosyncratic volatility.
+    pub idiosyncratic_volatility: f64,
+}
+
+/// Risk factor model specification.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FactorModel {
+    /// Factor names.
+    pub names: Vec<String>,
+    /// Factor covariance matrix (row-major, n x n).
+    pub covariance: Vec<f64>,
+}
+
+/// Supported `VaR` methodologies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VaRMethod {
+    /// Empirical Monte Carlo / simulated `VaR`.
+    MonteCarlo,
+    /// Historical replay `VaR`.
+    Historical,
+    /// Parametric Gaussian `VaR`.
+    Parametric,
 }
 
 /// A hedge-style portfolio used for `VaR` / scenario calculations.
@@ -178,6 +203,8 @@ pub struct VaR {
     pub value: f64,
     /// Horizon for the estimate.
     pub horizon: Duration,
+    /// Method used for the estimate.
+    pub method: VaRMethod,
 }
 
 /// Conditional Value-at-Risk result.
@@ -189,6 +216,8 @@ pub struct CVaR {
     pub value: f64,
     /// Horizon for the estimate.
     pub horizon: Duration,
+    /// Method used for the estimate.
+    pub method: VaRMethod,
 }
 
 /// Tail-risk summary.
@@ -229,6 +258,9 @@ pub enum RiskError {
     /// Invalid shock model.
     #[error("invalid shock model: {0}")]
     InvalidShockModel(&'static str),
+    /// Historical replay requires historical paths.
+    #[error("historical VaR requires non-empty historical scenarios")]
+    HistoricalDataRequired,
 }
 
 /// Main risk engine.
@@ -238,10 +270,12 @@ pub struct RiskEngine {
     confidence: f64,
     seed: u64,
     shock_model: ShockModel,
+    factor_model: Option<FactorModel>,
 }
 
 impl RiskEngine {
     /// Create a new engine with a backend and confidence level.
+    #[allow(clippy::missing_const_for_fn)]
     pub fn new(backend: QBackend, confidence: f64) -> Result<Self, RiskError> {
         if !(0.0..1.0).contains(&confidence) {
             return Err(RiskError::InvalidConfidence);
@@ -251,6 +285,7 @@ impl RiskEngine {
             confidence,
             seed: 42,
             shock_model: ShockModel::Gaussian,
+            factor_model: None,
         })
     }
 
@@ -262,7 +297,15 @@ impl RiskEngine {
         self
     }
 
-    /// Compute portfolio `VaR` over a horizon.
+    /// Attach a factor model.
+    #[must_use]
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn with_factor_model(mut self, factor_model: FactorModel) -> Self {
+        self.factor_model = Some(factor_model);
+        self
+    }
+
+    /// Compute portfolio `VaR` over a horizon using Monte Carlo.
     pub fn compute_var(
         &self,
         portfolio: &VaRPortfolio,
@@ -274,10 +317,11 @@ impl RiskEngine {
             confidence: self.confidence,
             value: var_value,
             horizon,
+            method: VaRMethod::MonteCarlo,
         })
     }
 
-    /// Compute portfolio `CVaR` over a horizon.
+    /// Compute portfolio `CVaR` over a horizon using Monte Carlo.
     pub fn compute_cvar(
         &self,
         portfolio: &VaRPortfolio,
@@ -289,6 +333,50 @@ impl RiskEngine {
             confidence: self.confidence,
             value: cvar_value,
             horizon,
+            method: VaRMethod::MonteCarlo,
+        })
+    }
+
+    /// Compute historical replay `VaR` from an explicit historical scenario matrix.
+    pub fn compute_historical_var(
+        &self,
+        portfolio: &VaRPortfolio,
+        horizon: Duration,
+        historical_returns: &[Vec<f64>],
+    ) -> Result<VaR, RiskError> {
+        if historical_returns.is_empty() {
+            return Err(RiskError::HistoricalDataRequired);
+        }
+        let bundle = self.replay_historical(portfolio, historical_returns)?;
+        Ok(VaR {
+            confidence: self.confidence,
+            value: compute_var_from_bundle(&bundle, self.confidence)?,
+            horizon,
+            method: VaRMethod::Historical,
+        })
+    }
+
+    /// Compute a parametric Gaussian `VaR` estimate.
+    pub fn compute_parametric_var(
+        &self,
+        portfolio: &VaRPortfolio,
+        horizon: Duration,
+    ) -> Result<VaR, RiskError> {
+        validate_portfolio(portfolio)?;
+        let normal = Normal::new(0.0, 1.0)
+            .map_err(|_| RiskError::InvalidBackend("failed to construct standard normal"))?;
+        let z = normal.inverse_cdf(self.confidence);
+        let sigma = if let Some(model) = &self.factor_model {
+            portfolio_sigma_from_factor_model(portfolio, model)?
+        } else {
+            portfolio_sigma_from_covariance(portfolio)
+        };
+        let horizon_scale = (horizon.num_days().max(1) as f64 / 252.0).sqrt();
+        Ok(VaR {
+            confidence: self.confidence,
+            value: z * sigma * horizon_scale,
+            horizon,
+            method: VaRMethod::Parametric,
         })
     }
 
@@ -303,11 +391,13 @@ impl RiskEngine {
             confidence: self.confidence,
             value: compute_var_from_bundle(&bundle, self.confidence)?,
             horizon,
+            method: VaRMethod::MonteCarlo,
         };
         let cvar = CVaR {
             confidence: self.confidence,
             value: compute_cvar_from_bundle(&bundle, self.confidence)?,
             horizon,
+            method: VaRMethod::MonteCarlo,
         };
         let extreme_loss = bundle
             .scenarios
@@ -336,11 +426,21 @@ impl RiskEngine {
         let mut rng = SmallRng::seed_from_u64(self.seed);
         let horizon = Duration::days(1);
         let scenarios = match &self.backend {
-            QBackend::ClassicalFallback => {
-                simulate_classical(portfolio, n_paths, &self.shock_model, &mut rng)?
-            }
+            QBackend::ClassicalFallback => simulate_classical(
+                portfolio,
+                self.factor_model.as_ref(),
+                n_paths,
+                &self.shock_model,
+                &mut rng,
+            )?,
             QBackend::QuantumInspired { .. } | QBackend::QuantumHardware { .. } => {
-                simulate_quantum_inspired(portfolio, n_paths, &self.shock_model, &mut rng)?
+                simulate_quantum_inspired(
+                    portfolio,
+                    self.factor_model.as_ref(),
+                    n_paths,
+                    &self.shock_model,
+                    &mut rng,
+                )?
             }
         };
 
@@ -428,6 +528,34 @@ fn cholesky_decompose(matrix: &[Vec<f64>]) -> Vec<Vec<f64>> {
     l
 }
 
+fn factor_shocks(
+    factor_model: &FactorModel,
+    shock_model: &ShockModel,
+    rng: &mut SmallRng,
+) -> Result<Vec<f64>, RiskError> {
+    let n = factor_model.names.len();
+    if factor_model.covariance.len() != n * n {
+        return Err(RiskError::InvalidBackend(
+            "factor covariance must match factor count",
+        ));
+    }
+    let mut temp_positions = Vec::with_capacity(n);
+    for name in &factor_model.names {
+        temp_positions.push(Position {
+            instrument: name.clone(),
+            quantity: 1.0,
+            price: 1.0,
+            volatility: 1.0,
+            delta: 1.0,
+            gamma: 0.0,
+            factor_loadings: vec![],
+            idiosyncratic_volatility: 0.0,
+        });
+    }
+    let portfolio = VaRPortfolio::from_positions(temp_positions, factor_model.covariance.clone());
+    correlated_shocks(&portfolio, shock_model, rng)
+}
+
 fn correlated_shocks(
     portfolio: &VaRPortfolio,
     shock_model: &ShockModel,
@@ -481,6 +609,72 @@ fn correlated_shocks(
     Ok(correlated)
 }
 
+fn returns_from_factor_model(
+    portfolio: &VaRPortfolio,
+    factor_model: &FactorModel,
+    shock_model: &ShockModel,
+    rng: &mut SmallRng,
+) -> Result<Vec<f64>, RiskError> {
+    let factors = factor_shocks(factor_model, shock_model, rng)?;
+    let normal = StandardNormal;
+    Ok(portfolio
+        .positions
+        .iter()
+        .map(|p| {
+            let factor_component: f64 = p
+                .factor_loadings
+                .iter()
+                .zip(&factors)
+                .map(|(loading, f)| loading * f)
+                .sum();
+            let idio: f64 = normal.sample(rng);
+            p.idiosyncratic_volatility.mul_add(idio, factor_component)
+        })
+        .collect())
+}
+
+fn portfolio_sigma_from_covariance(portfolio: &VaRPortfolio) -> f64 {
+    let cov = covariance_matrix(portfolio);
+    let notionals: Vec<f64> = portfolio
+        .positions
+        .iter()
+        .map(|p| p.quantity * p.price * p.delta)
+        .collect();
+    let mut variance = 0.0;
+    for i in 0..notionals.len() {
+        for j in 0..notionals.len() {
+            variance += notionals[i] * notionals[j] * cov[i][j] / 252.0;
+        }
+    }
+    variance.max(0.0).sqrt()
+}
+
+fn portfolio_sigma_from_factor_model(
+    portfolio: &VaRPortfolio,
+    factor_model: &FactorModel,
+) -> Result<f64, RiskError> {
+    let f = factor_model.names.len();
+    if factor_model.covariance.len() != f * f {
+        return Err(RiskError::InvalidBackend(
+            "factor covariance must match factor count",
+        ));
+    }
+    let mut variance = 0.0;
+    let factor_cov = &factor_model.covariance;
+    for pos in &portfolio.positions {
+        let exposure = pos.quantity * pos.price * pos.delta;
+        for i in 0..f {
+            for j in 0..f {
+                let beta_i = *pos.factor_loadings.get(i).unwrap_or(&0.0);
+                let beta_j = *pos.factor_loadings.get(j).unwrap_or(&0.0);
+                variance += exposure * exposure * beta_i * beta_j * factor_cov[i * f + j] / 252.0;
+            }
+        }
+        variance += (exposure * pos.idiosyncratic_volatility).powi(2) / 252.0;
+    }
+    Ok(variance.max(0.0).sqrt())
+}
+
 fn pnl_from_returns(portfolio: &VaRPortfolio, returns: &[f64]) -> f64 {
     portfolio
         .positions
@@ -496,6 +690,7 @@ fn pnl_from_returns(portfolio: &VaRPortfolio, returns: &[f64]) -> f64 {
 
 fn simulate_classical(
     portfolio: &VaRPortfolio,
+    factor_model: Option<&FactorModel>,
     n_paths: u64,
     shock_model: &ShockModel,
     rng: &mut SmallRng,
@@ -503,7 +698,11 @@ fn simulate_classical(
     let horizon_scale = (1.0_f64 / 252.0_f64).sqrt();
     (0..n_paths)
         .map(|path_id| {
-            let shocks = correlated_shocks(portfolio, shock_model, rng)?;
+            let shocks = if let Some(model) = factor_model {
+                returns_from_factor_model(portfolio, model, shock_model, rng)?
+            } else {
+                correlated_shocks(portfolio, shock_model, rng)?
+            };
             let returns: Vec<f64> = shocks.into_iter().map(|s| s * horizon_scale).collect();
             let pnl = pnl_from_returns(portfolio, &returns);
             Ok(Scenario {
@@ -517,6 +716,7 @@ fn simulate_classical(
 
 fn simulate_quantum_inspired(
     portfolio: &VaRPortfolio,
+    factor_model: Option<&FactorModel>,
     n_paths: u64,
     shock_model: &ShockModel,
     rng: &mut SmallRng,
@@ -524,7 +724,11 @@ fn simulate_quantum_inspired(
     let horizon_scale = (1.0_f64 / 252.0_f64).sqrt();
     (0..n_paths)
         .map(|path_id| {
-            let mut shocks = correlated_shocks(portfolio, shock_model, rng)?;
+            let mut shocks = if let Some(model) = factor_model {
+                returns_from_factor_model(portfolio, model, shock_model, rng)?
+            } else {
+                correlated_shocks(portfolio, shock_model, rng)?
+            };
             let tail_bias = if path_id % 4 == 0 { 1.5 } else { 1.0 };
             for s in &mut shocks {
                 if *s < 0.0 {
@@ -580,6 +784,8 @@ mod tests {
             volatility: vol,
             delta: 1.0,
             gamma: 0.05,
+            factor_loadings: vec![1.0, 0.2],
+            idiosyncratic_volatility: 0.1,
         }
     }
 
@@ -589,6 +795,13 @@ mod tests {
             out[i * n + i] = 1.0;
         }
         out
+    }
+
+    fn simple_factor_model() -> FactorModel {
+        FactorModel {
+            names: vec!["market".into(), "value".into()],
+            covariance: vec![1.0, 0.2, 0.2, 1.0],
+        }
     }
 
     #[test]
@@ -640,6 +853,30 @@ mod tests {
             .replay_historical(&portfolio, &[vec![-0.02], vec![0.01], vec![-0.05]])
             .unwrap();
         assert_eq!(bundle.n_paths, 3);
+    }
+
+    #[test]
+    fn parametric_var_is_positive() {
+        let portfolio =
+            VaRPortfolio::from_positions(vec![simple_position(10.0, 0.2)], identity_corr(1));
+        let engine = RiskEngine::new(QBackend::ClassicalFallback, 0.99).unwrap();
+        let var = engine
+            .compute_parametric_var(&portfolio, Duration::days(1))
+            .unwrap();
+        assert!(var.value > 0.0);
+    }
+
+    #[test]
+    fn factor_model_var_path_works() {
+        let portfolio = VaRPortfolio::from_positions(
+            vec![simple_position(10.0, 0.2), simple_position(12.0, 0.25)],
+            identity_corr(2),
+        );
+        let engine = RiskEngine::new(QBackend::ClassicalFallback, 0.95)
+            .unwrap()
+            .with_factor_model(simple_factor_model());
+        let bundle = engine.simulate_scenarios(&portfolio, 128).unwrap();
+        assert_eq!(bundle.n_paths, 128);
     }
 
     proptest! {
