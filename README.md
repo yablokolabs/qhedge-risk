@@ -9,6 +9,8 @@
 - scenario simulation
 - tail-risk and extreme-event stress analysis
 - historical replay / stress bundles
+- factor-model-based scenario generation
+- multiple VaR methodologies: Monte Carlo, historical, and parametric
 - correlated multivariate simulation and fat-tail shock models
 - future quantum-style / quantum-ready backend experimentation
 
@@ -108,3 +110,12 @@ This is an initial scaffold for a future open-source quant risk engine with:
 - quantum-inspired backend abstractions
 - Lean-verification direction
 - Python integration path
+
+## Mathematical focus
+
+The engine now supports:
+- correlated covariance-driven Monte Carlo
+- factor-model shock propagation
+- historical replay
+- parametric Gaussian VaR
+- heavy-tail stress generation via Student-t and crash-mixture shock models
