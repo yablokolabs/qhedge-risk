@@ -8,6 +8,8 @@
 - Conditional Value-at-Risk (CVaR)
 - scenario simulation
 - tail-risk and extreme-event stress analysis
+- historical replay / stress bundles
+- correlated multivariate simulation and fat-tail shock models
 - future quantum-style / quantum-ready backend experimentation
 
 ## What “Q” means
@@ -67,7 +69,7 @@ The crate exposes a backend abstraction:
 - `QBackend::QuantumInspired { max_samples }`
 - `QBackend::QuantumHardware { leap_token, solver_url }`
 
-The current implementation focuses on classical and quantum-inspired runtime paths. The hardware path is a future-ready interface placeholder.
+The current implementation focuses on classical and quantum-inspired runtime paths, with shock models such as Gaussian, Student-t, and crash-mixture style tails. The hardware path is a future-ready interface placeholder.
 
 ## Lean verification layer
 
