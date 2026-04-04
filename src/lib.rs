@@ -10,7 +10,7 @@
 //! - heavier-tail shock models
 //! - historical replay
 //! - factor-model-based scenario generation
-//! - empirical, historical, and parametric VaR estimators
+//! - empirical, historical, and parametric `VaR` estimators
 
 extern crate alloc;
 
@@ -94,14 +94,14 @@ pub struct FactorModel {
     pub covariance: Vec<f64>,
 }
 
-/// Supported VaR methodologies.
+/// Supported `VaR` methodologies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VaRMethod {
-    /// Empirical Monte Carlo / simulated VaR.
+    /// Empirical Monte Carlo / simulated `VaR`.
     MonteCarlo,
-    /// Historical replay VaR.
+    /// Historical replay `VaR`.
     Historical,
-    /// Parametric Gaussian VaR.
+    /// Parametric Gaussian `VaR`.
     Parametric,
 }
 
@@ -628,7 +628,7 @@ fn returns_from_factor_model(
                 .map(|(loading, f)| loading * f)
                 .sum();
             let idio: f64 = normal.sample(rng);
-            factor_component + p.idiosyncratic_volatility * idio
+            p.idiosyncratic_volatility.mul_add(idio, factor_component)
         })
         .collect())
 }
