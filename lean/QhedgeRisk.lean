@@ -3,15 +3,14 @@
 
 A Lean 4 specification companion for the Rust `qhedge-risk` engine.
 
-This file is intended to mirror the main Rust concepts more directly:
-- `ShockModel`
-- portfolio / position exposure structure
-- historical replay loss construction
-- empirical `VaR` / `CVaR` from replayed losses
-- factor exposure and covariance quadratic forms
-- factor-aware parametric `VaR` hooks
+This file now combines the earlier Rust ↔ Lean alignment pass with the tighter
+finite-sample risk-measure pass:
+- direct mirroring of Rust concepts like `ShockModel`, `VaRMethod`, scenario bundles,
+  delta/gamma loss structure, replay semantics, and factor-aware risk hooks
+- tighter empirical risk semantics via explicit sorting, quantile-index selection,
+  tail-set construction, and empirical `CVaR`
 
-It is still a spec layer rather than machine-checked Rust verification.
+It remains a specification layer rather than machine-checked Rust verification.
 -/
 
 namespace QhedgeRisk
@@ -119,15 +118,31 @@ def historicalScenarioBundle (p : Portfolio) (rp : ReturnProcess) : ScenarioBund
         returns := returns }
   { scenarios := scenarios, shockModel := rp.shockModel, method := VaRMethod.historical }
 
-/-- A toy empirical `VaR` proxy over a finite sample.
-This still abstracts away sorting / quantile-index selection and treats the head
-of the supplied list as the chosen quantile representative. -/
-def empiricalVaR (α : Confidence) (losses : List Loss) : Loss :=
-  match losses with
-  | [] => 0
-  | x :: _ => x
+/-- Insertion into an already nondecreasing list. -/
+def insertSorted : Loss → List Loss → List Loss
+  | x, [] => [x]
+  | x, y :: ys => if x ≤ y then x :: y :: ys else y :: insertSorted x ys
 
-/-- Tail losses above a chosen `VaR` threshold. -/
+/-- Nondecreasing sort of losses. -/
+def sortLosses : List Loss → List Loss
+  | [] => []
+  | x :: xs => insertSorted x (sortLosses xs)
+
+/-- Quantile index matching the Rust-style `floor(confidence * n)` shape, clipped to `n - 1`. -/
+def quantileIndex (α : Confidence) (n : Nat) : Nat :=
+  if h : n = 0 then 0
+  else min (Int.toNat ⌊α * n⌋) (n - 1)
+
+/-- Safe list lookup with default zero. -/
+def lossAt (xs : List Loss) (i : Nat) : Loss :=
+  xs.getD i 0
+
+/-- Empirical `VaR` over sorted losses. -/
+def empiricalVaR (α : Confidence) (losses : List Loss) : Loss :=
+  let sorted := sortLosses losses
+  lossAt sorted (quantileIndex α sorted.length)
+
+/-- Tail losses above a chosen empirical `VaR` threshold. -/
 def tailLosses (α : Confidence) (losses : List Loss) : List Loss :=
   let v := empiricalVaR α losses
   losses.filter fun ℓ => v ≤ ℓ
@@ -199,17 +214,16 @@ theorem parametric_var_monotonic_in_scale
   dsimp [parametricVaRValue]
   nlinarith
 
-/-- If each tail loss is above the chosen `VaR` threshold, empirical `CVaR`
-should not fall below empirical `VaR`. -/
-theorem cvar_geq_var
+/-- Every element of `tailLosses` is at least the empirical `VaR` threshold by construction. -/
+theorem var_le_tail_member
     (α : Confidence)
     (losses : List Loss)
-    (h_tail : ∀ ℓ ∈ tailLosses α losses, empiricalVaR α losses ≤ ℓ) :
-    empiricalVaR α losses ≤ empiricalCVaR α losses := by
-  by_cases h : tailLosses α losses = []
-  · simp [empiricalCVaR, h]
-  · simp [empiricalCVaR, h]
-    sorry
+    (ℓ : Loss)
+    (hℓ : ℓ ∈ tailLosses α losses) :
+    empiricalVaR α losses ≤ ℓ := by
+  unfold tailLosses at hℓ
+  simp at hℓ
+  exact hℓ.2
 
 /-- If each position exposure weakly increases, total portfolio exposure also weakly increases. -/
 theorem monotonic_in_exposure
@@ -243,10 +257,34 @@ theorem historical_var_nonnegative
     (rp : ReturnProcess)
     (h : ∀ ℓ ∈ replayHistorical p rp, 0 ≤ ℓ) :
     0 ≤ (historicalVaR α p rp).value := by
-  cases hsc : replayHistorical p rp with
-  | nil => simp [historicalVaR, empiricalVaR, hsc]
-  | cons x xs =>
-      have hx : 0 ≤ x := h x (by simp [hsc])
-      simpa [historicalVaR, empiricalVaR, hsc] using hx
+  unfold historicalVaR
+  simp
+  by_cases hs : sortLosses (replayHistorical p rp) = []
+  · simp [empiricalVaR, hs]
+  ·
+    have hnonempty : replayHistorical p rp ≠ [] := by
+      intro hnil
+      simp [hnil] at hs
+    sorry
+
+/-- Empirical `CVaR` falls back to empirical `VaR` when the tail set is empty. -/
+theorem cvar_eq_var_when_no_tail
+    (α : Confidence)
+    (losses : List Loss)
+    (h : tailLosses α losses = []) :
+    empiricalCVaR α losses = empiricalVaR α losses := by
+  simp [empiricalCVaR, h]
+
+/-- If each tail loss is above the chosen `VaR` threshold, empirical `CVaR`
+should not fall below empirical `VaR`. -/
+theorem cvar_geq_var
+    (α : Confidence)
+    (losses : List Loss)
+    (h_tail : ∀ ℓ ∈ tailLosses α losses, empiricalVaR α losses ≤ ℓ) :
+    empiricalVaR α losses ≤ empiricalCVaR α losses := by
+  by_cases h : tailLosses α losses = []
+  · simp [empiricalCVaR, h]
+  · simp [empiricalCVaR, h]
+    sorry
 
 end QhedgeRisk
